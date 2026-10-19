@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -13,11 +14,11 @@
       --accent: #FFD400;
       --white: #FFFFFF;
       --black: #000000;
-      --g-bg: #F3F3F3;      /* серый фон второстепенных кнопок */
-      --g-line: #E3E3E3;    /* серые рамки карточек */
-      --g-border: #CCCCCC;  /* рамки полей ввода */
-      --g-text: #7A7A7A;    /* второстепенный текст */
-      --g-dark: #4A4A4A;    /* тёмно-серый текст */
+      --g-bg: #F3F3F3;
+      --g-line: #E3E3E3;
+      --g-border: #CCCCCC;
+      --g-text: #7A7A7A;
+      --g-dark: #4A4A4A;
 
       /* Safe-area: системные отступы + отступы Telegram (Bot API 8.0+) */
       --safe-top: max(env(safe-area-inset-top, 0px), calc(var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px)));
@@ -323,6 +324,11 @@
       background: var(--white);
     }
 
+    .item.editing {
+      padding: 12px;
+      border-color: var(--black);
+    }
+
     .check {
       flex: none;
       width: 52px;
@@ -359,6 +365,8 @@
       min-width: 0;
       padding-top: 13px;
     }
+
+    .item.editing .item-body { padding-top: 0; }
 
     .item-text {
       font-size: 17px;
@@ -406,6 +414,53 @@
     }
 
     .item.done .thumb img { opacity: 0.5; }
+
+    .link-btn {
+      margin-top: 8px;
+      max-width: 100%;
+    }
+
+    .link-host {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* Поля «Цена факт» и «Место» в карточке Фудсити */
+    .fact-row {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .mini-field {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .mini-field input {
+      min-height: 48px;
+      padding: 10px 12px;
+    }
+
+    /* Редактор записи */
+    .edit-form {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .edit-actions {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 4px;
+    }
+
+    .edit-actions .btn { width: 100%; }
 
     .item-actions {
       flex: none;
@@ -531,25 +586,35 @@
     'use strict';
 
     /* =====================================================================
+       НАСТРОЙКА СЕРВЕРА БОТА
+       Вставь адрес своего Cloudflare Worker, например:
+       const API_URL = 'https://spiski-bot.zelluga.workers.dev';
+       Если оставить пустым — приложение работает без бота (только на телефоне).
+       ===================================================================== */
+    const API_URL = 'https://spiski-bot.zelluga.workers.dev';
+
+    /* =====================================================================
        КОНСТАНТЫ И НАСТРОЙКИ
        ===================================================================== */
 
     const tg = (window.Telegram && window.Telegram.WebApp) ? window.Telegram.WebApp : null;
 
     const STORAGE_KEY = 'lists_app_v1';
+    const SYNC_KEY = 'lists_app_tasks_synced'; // последняя отправленная на сервер версия задач
     const LIST_KEYS = ['buy_foodcity', 'buy_shops', 'ideas', 'watch', 'places', 'tasks'];
     const SOURCES = ['Instagram', 'Интернет', 'Друзья\\коллеги', 'Другое'];
 
-    const IMAGE_MAX_WIDTH = 800;   // ширина после сжатия
-    const IMAGE_MAX_HEIGHT = 2000; // ограничение для очень длинных скриншотов
-    const IMAGE_QUALITY = 0.7;     // качество JPEG
+    const IMAGE_MAX_WIDTH = 800;
+    const IMAGE_MAX_HEIGHT = 2000;
+    const IMAGE_QUALITY = 0.7;
 
     /* Настройки экранов списков */
     const SECTIONS = {
       buy_foodcity: {
         title: 'Фудсити', icon: '🛒', parent: 'buy',
         textLabel: 'Продукты', placeholder: 'Например: картошка, яблоки, зелень',
-        price: true, comment: true, emptyRequired: 'Укажите продукты'
+        price: true, comment: true, factFields: true, editable: true,
+        emptyRequired: 'Укажите продукты'
       },
       buy_shops: {
         title: 'Просто магазины', icon: '🏬', parent: 'buy',
@@ -563,7 +628,7 @@
       watch: {
         title: 'Что смотреть', icon: '🎬', parent: 'home',
         textLabel: 'Название / описание', placeholder: 'Фильм, сериал, видео…',
-        doneLabel: 'посмотрел', emptyRequired: 'Введите название'
+        link: true, doneLabel: 'посмотрел', emptyRequired: 'Введите название или ссылку'
       },
       places: {
         title: 'Рестораны/события', icon: '📍', parent: 'home',
@@ -601,14 +666,17 @@
        ===================================================================== */
 
     let data = loadData();
-    let route = { name: 'home' };          // home | buy | list(key)
+    let route = { name: 'home' };
     let form = { image: null, processing: false };
-    let editingDateId = null;              // id задачи, у которой открыт редактор даты
+    let editingDateId = null;   // задача, у которой открыт выбор даты
+    let editingItemId = null;   // запись Фудсити, которая сейчас редактируется
     let viewerOpen = false;
     let recognition = null;
     let listening = false;
     let toastTimer = null;
     let toastActionHandler = null;
+    let taskSyncTimer = null;
+    let inboxBusy = false;
 
     const app = document.getElementById('app');
     const viewer = document.getElementById('viewer');
@@ -637,7 +705,6 @@
       return String(n).padStart(2, '0');
     }
 
-    /* Локальная дата в формате YYYY-MM-DD */
     function toISODate(d) {
       return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
     }
@@ -670,8 +737,48 @@
       return Number(value).toLocaleString('ru-RU', { maximumFractionDigits: 2 }) + ' ₽';
     }
 
+    /* Число из поля ввода: пусто или мусор → null */
+    function parsePrice(raw) {
+      const v = String(raw || '').trim().replace(',', '.');
+      if (!v) return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+
+    /* Значение для value у числового поля */
+    function numValue(v) {
+      return (v === null || v === undefined || v === '') ? '' : String(v);
+    }
+
     function isValidImage(src) {
       return typeof src === 'string' && src.indexOf('data:image/') === 0;
+    }
+
+    /* Ссылка: добавляем https:// при необходимости, пропускаем только http/https */
+    function normalizeLink(value) {
+      let v = String(value || '').trim();
+      if (!v) return '';
+      if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
+      try {
+        const u = new URL(v);
+        return (u.protocol === 'http:' || u.protocol === 'https:') ? u.href : '';
+      } catch (e) {
+        return '';
+      }
+    }
+
+    /* Первая ссылка из текста */
+    function extractLink(text) {
+      const m = String(text || '').match(/https?:\/\/[^\s<>"']+/i);
+      return m ? normalizeLink(m[0]) : '';
+    }
+
+    function linkHost(url) {
+      try {
+        return new URL(url).hostname.replace(/^www\./, '');
+      } catch (e) {
+        return url;
+      }
     }
 
     function versionAtLeast(v) {
@@ -687,7 +794,7 @@
       try {
         if (type === 'success') tg.HapticFeedback.notificationOccurred('success');
         else tg.HapticFeedback.impactOccurred('light');
-      } catch (e) { /* вибро недоступно — игнорируем */ }
+      } catch (e) { /* вибро недоступно */ }
     }
 
     function getFirstName() {
@@ -697,6 +804,22 @@
       } catch (e) {
         return '';
       }
+    }
+
+    /* Открыть ссылку: t.me — внутри Telegram, остальные — во внешнем браузере */
+    function openExternal(url) {
+      if (!/^https?:\/\//i.test(url)) return;
+      try {
+        if (tg && /^https:\/\/t\.me\//i.test(url) && versionAtLeast('6.1')) {
+          tg.openTelegramLink(url);
+          return;
+        }
+        if (tg && typeof tg.openLink === 'function') {
+          tg.openLink(url);
+          return;
+        }
+      } catch (e) { /* ниже — запасной вариант */ }
+      window.open(url, '_blank', 'noopener');
     }
 
     /* =====================================================================
@@ -729,6 +852,7 @@
     function saveData() {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        scheduleTaskSync();
         return true;
       } catch (e) {
         if (isQuotaError(e)) {
@@ -766,6 +890,7 @@
     function navigate(newRoute) {
       abortVoice();
       editingDateId = null;
+      editingItemId = null;
       form = { image: null, processing: false };
       route = newRoute;
       render();
@@ -857,12 +982,20 @@
         <div class="screen">
           ${headerHTML()}
           <h1>${s.icon} ${esc(s.title)}</h1>
+          ${s.link && serverEnabled() ? '<p class="hint">💬 Перешли боту сообщение с фильмом, сериалом или ссылкой — оно появится здесь.</p>' : ''}
+          ${s.date && serverEnabled() ? '<p class="hint">🔔 Бот напомнит в Telegram за день до даты, в 10:00.</p>' : ''}
 
           <form class="add-form" id="addForm" autocomplete="off" novalidate>
             <label class="field">
               <span class="label">${esc(s.textLabel)}</span>
               <textarea id="fText" rows="2" placeholder="${esc(s.placeholder)}"></textarea>
             </label>
+
+            ${s.link ? `
+            <label class="field">
+              <span class="label">Ссылка (необязательно)</span>
+              <input id="fLink" type="url" inputmode="url" placeholder="https://…">
+            </label>` : ''}
 
             ${s.price ? `
             <label class="field">
@@ -916,30 +1049,81 @@
         </div>`;
     }
 
-    /* Текст срока у задачи */
     function dueText(item) {
       if (!item.date) return '📅 Без даты';
       const overdue = !item.done && item.date < todayISO();
       return '📅 ' + formatDue(item.date) + (overdue ? ' · просрочено' : '');
     }
 
+    /* Карточка в режиме редактирования (Фудсити) */
+    function editItemHTML(item) {
+      return `
+        <div class="item editing" data-id="${esc(item.id)}">
+          <div class="item-body edit-form">
+            <label class="field">
+              <span class="label">Продукты</span>
+              <textarea class="e-text" rows="2">${esc(item.text || '')}</textarea>
+            </label>
+            <label class="field">
+              <span class="label">Цена, ₽</span>
+              <input class="e-price" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0" value="${esc(numValue(item.price))}">
+            </label>
+            <label class="field">
+              <span class="label">Цена факт, ₽</span>
+              <input class="e-priceFact" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0" value="${esc(numValue(item.priceFact))}">
+            </label>
+            <label class="field">
+              <span class="label">Место</span>
+              <input class="e-place" type="text" placeholder="Где купил" value="${esc(item.place || '')}">
+            </label>
+            <label class="field">
+              <span class="label">Комментарий</span>
+              <textarea class="e-comment" rows="2" placeholder="Необязательно">${esc(item.comment || '')}</textarea>
+            </label>
+            <div class="edit-actions">
+              <button class="btn primary" type="button" data-action="save-edit">Сохранить</button>
+              <button class="btn" type="button" data-action="cancel-edit">Отмена</button>
+            </div>
+          </div>
+        </div>`;
+    }
+
     function itemHTML(item, key) {
       const s = SECTIONS[key];
+      if (s.editable && editingItemId === item.id) return editItemHTML(item);
+
       const doneLabel = s.doneLabel || 'выполнено';
       const lines = [];
 
       if (item.text) lines.push(`<div class="item-text">${esc(item.text)}</div>`);
-      if (s.price && item.price !== null && item.price !== undefined && item.price !== '') {
+      if (s.price && typeof item.price === 'number') {
         lines.push(`<div class="item-line"><b>💰 ${esc(formatPrice(item.price))}</b></div>`);
       }
       if (s.shop && item.shop) lines.push(`<div class="item-line">🏪 ${esc(item.shop)}</div>`);
       if (s.comment && item.comment) lines.push(`<div class="item-line muted">💬 ${esc(item.comment)}</div>`);
       if (s.source && item.source) lines.push(`<div class="item-line">👤 Посоветовал: ${esc(item.source)}</div>`);
       if (s.date) lines.push(`<div class="item-line due-line">${esc(dueText(item))}</div>`);
+      if (s.link && item.link) {
+        lines.push(`<button class="btn small link-btn" type="button" data-action="open-link"><span class="link-host">🔗 ${esc(linkHost(item.link))}</span></button>`);
+      }
       if (isValidImage(item.image)) {
         lines.push(`<button class="thumb" type="button" data-action="view-image" aria-label="Открыть картинку"><img src="${esc(item.image)}" alt="Картинка" loading="lazy"></button>`);
       }
       lines.push(`<div class="item-date">Создано: ${esc(formatCreated(item.created))}</div>`);
+
+      if (s.factFields) {
+        lines.push(`
+          <div class="fact-row">
+            <label class="mini-field">
+              <span class="label">Цена факт</span>
+              <input class="fact-input" data-field="priceFact" type="number" inputmode="decimal" min="0" step="0.01" placeholder="0" value="${esc(numValue(item.priceFact))}">
+            </label>
+            <label class="mini-field">
+              <span class="label">Место</span>
+              <input class="fact-input" data-field="place" type="text" placeholder="Где купил" value="${esc(item.place || '')}">
+            </label>
+          </div>`);
+      }
 
       if (s.date && editingDateId === item.id) {
         lines.push(`
@@ -958,15 +1142,40 @@
           </button>
           <div class="item-body">${lines.join('')}</div>
           <div class="item-actions">
+            ${s.editable ? `<button class="icon-btn" type="button" data-action="edit-item" aria-label="Редактировать">✏️</button>` : ''}
             ${s.date ? `<button class="icon-btn" type="button" data-action="edit-date" aria-label="Изменить дату">📅</button>` : ''}
             <button class="icon-btn" type="button" data-action="delete" aria-label="Удалить">🗑</button>
           </div>
         </div>`;
     }
 
-    /* Сортировка: невыполненные сверху (новые выше), выполненные снизу */
     function sortItems(arr) {
       return arr.slice().sort((a, b) => (Number(a.done) - Number(b.done)) || (b.created - a.created));
+    }
+
+    /* Итоги по ценам: план для невыполненных, факт — по всем записям */
+    function updateTotals() {
+      if (route.name !== 'list') return;
+      const s = SECTIONS[route.key];
+      const totalEl = document.getElementById('total');
+      if (!s.price || !totalEl) return;
+
+      const items = data[route.key];
+      const parts = [];
+      const plan = items
+        .filter((i) => !i.done && typeof i.price === 'number')
+        .reduce((acc, i) => acc + i.price, 0);
+      if (plan > 0) parts.push('К покупке: ' + formatPrice(plan));
+
+      if (s.factFields) {
+        const fact = items
+          .filter((i) => typeof i.priceFact === 'number')
+          .reduce((acc, i) => acc + i.priceFact, 0);
+        if (fact > 0) parts.push('Факт: ' + formatPrice(fact));
+      }
+
+      totalEl.textContent = parts.join(' · ');
+      totalEl.classList.toggle('hidden', !parts.length);
     }
 
     function renderItems() {
@@ -977,17 +1186,7 @@
       const s = SECTIONS[key];
       const items = data[key];
 
-      /* Итог по ценам для покупок */
-      if (s.price) {
-        const totalEl = document.getElementById('total');
-        const sum = items
-          .filter((i) => !i.done && typeof i.price === 'number' && !Number.isNaN(i.price))
-          .reduce((acc, i) => acc + i.price, 0);
-        if (totalEl) {
-          totalEl.textContent = 'Итого к покупке: ' + formatPrice(sum);
-          totalEl.classList.toggle('hidden', sum <= 0);
-        }
-      }
+      updateTotals();
 
       if (!items.length) {
         container.innerHTML = '<div class="empty">Пока пусто — добавь первую запись</div>';
@@ -1007,7 +1206,7 @@
       items.forEach((item) => {
         if (item.done) groups.done.push(item);
         else if (!item.date) groups.nodate.push(item);
-        else if (item.date <= today) groups.today.push(item);   // просроченные тоже в «Сегодня»
+        else if (item.date <= today) groups.today.push(item);
         else if (item.date === tomorrow) groups.tomorrow.push(item);
         else groups.later.push(item);
       });
@@ -1050,8 +1249,10 @@
       const s = SECTIONS[key];
       const textEl = $('#fText');
       const text = textEl.value.trim();
+      let link = '';
+      if (s.link) link = normalizeLink($('#fLink').value) || extractLink(text);
 
-      if (!text && !form.image) {
+      if (!text && !form.image && !link) {
         showToast(s.emptyRequired);
         textEl.focus();
         return;
@@ -1059,13 +1260,14 @@
 
       const item = { id: uid(), text: text, done: false, created: Date.now(), image: form.image || null };
 
-      if (s.price) {
-        const raw = $('#fPrice').value.trim().replace(',', '.');
-        const num = raw === '' ? null : Number(raw);
-        item.price = (num === null || Number.isNaN(num)) ? null : num;
-      }
+      if (s.price) item.price = parsePrice($('#fPrice').value);
       if (s.shop) item.shop = $('#fShop').value.trim();
       if (s.comment) item.comment = $('#fComment').value.trim();
+      if (s.factFields) {
+        item.priceFact = null;
+        item.place = '';
+      }
+      if (s.link) item.link = link;
       if (s.source) item.source = $('#fSource').value;
       if (s.date) item.date = $('#fDate').value || null;
 
@@ -1079,7 +1281,7 @@
     }
 
     function resetForm() {
-      const ids = ['fText', 'fPrice', 'fShop', 'fComment', 'fSource', 'fDate'];
+      const ids = ['fText', 'fLink', 'fPrice', 'fShop', 'fComment', 'fSource', 'fDate'];
       ids.forEach((id) => {
         const el = document.getElementById(id);
         if (el) el.value = '';
@@ -1123,6 +1325,63 @@
       }, 4500);
     }
 
+    /* ----- Редактирование записи (Фудсити) ----- */
+
+    function openEditor(id) {
+      editingItemId = id;
+      editingDateId = null;
+      renderItems();
+      const card = document.querySelector(`.item[data-id="${CSS.escape(id)}"]`);
+      if (!card) return;
+      card.querySelectorAll('textarea').forEach(autoGrow);
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    function saveEdit(id, card) {
+      const key = route.key;
+      const item = findItem(key, id);
+      if (!item || !card) return;
+
+      const text = card.querySelector('.e-text').value.trim();
+      if (!text && !item.image) {
+        showToast(SECTIONS[key].emptyRequired);
+        return;
+      }
+
+      const ok = mutate(() => {
+        item.text = text;
+        item.price = parsePrice(card.querySelector('.e-price').value);
+        item.priceFact = parsePrice(card.querySelector('.e-priceFact').value);
+        item.place = card.querySelector('.e-place').value.trim();
+        item.comment = card.querySelector('.e-comment').value.trim();
+      });
+      if (!ok) return;
+
+      editingItemId = null;
+      renderItems();
+      haptic('success');
+      showToast('Сохранено');
+    }
+
+    function cancelEdit() {
+      editingItemId = null;
+      renderItems();
+    }
+
+    /* Быстрое сохранение «Цена факт» / «Место» прямо из карточки */
+    function setFact(id, field, inputEl) {
+      if (route.name !== 'list') return;
+      const item = findItem(route.key, id);
+      if (!item) return;
+      const prev = item[field];
+      const value = field === 'priceFact' ? parsePrice(inputEl.value) : inputEl.value.trim();
+      if (!mutate(() => { item[field] = value; })) {
+        inputEl.value = field === 'priceFact' ? numValue(prev) : (prev || '');
+        return;
+      }
+      updateTotals();
+    }
+
     /* ----- Дата задачи ----- */
 
     function openDateEditor(id) {
@@ -1136,11 +1395,10 @@
         if (typeof input.showPicker === 'function') input.showPicker();
         else input.focus();
       } catch (e) {
-        input.focus(); // showPicker может быть запрещён во встроенном окне
+        input.focus();
       }
     }
 
-    /* Сохраняем дату без перерисовки, чтобы не закрыть системный пикер */
     function setTaskDate(id, value, inputEl) {
       const item = findItem('tasks', id);
       if (!item) return;
@@ -1163,7 +1421,7 @@
 
     function closeDateEditor() {
       editingDateId = null;
-      renderItems(); // перераспределяем задачу по группам
+      renderItems();
     }
 
     /* =====================================================================
@@ -1184,7 +1442,7 @@
             canvas.width = w;
             canvas.height = h;
             const ctx = canvas.getContext('2d');
-            ctx.fillStyle = '#FFFFFF'; // фон для PNG с прозрачностью
+            ctx.fillStyle = '#FFFFFF';
             ctx.fillRect(0, 0, w, h);
             ctx.drawImage(img, 0, 0, w, h);
             URL.revokeObjectURL(url);
@@ -1206,7 +1464,7 @@
 
     async function handleImageInput(input) {
       const file = input.files && input.files[0];
-      input.value = ''; // чтобы можно было выбрать тот же файл повторно
+      input.value = '';
       if (!file) return;
 
       if (file.type && file.type.indexOf('image/') !== 0) {
@@ -1238,8 +1496,6 @@
         preview.classList.add('hidden');
       }
     }
-
-    /* ----- Полноэкранный просмотр ----- */
 
     function openViewer(src) {
       if (!isValidImage(src)) return;
@@ -1338,6 +1594,100 @@
     }
 
     /* =====================================================================
+       СВЯЗЬ С СЕРВЕРОМ БОТА
+       ===================================================================== */
+
+    function serverEnabled() {
+      return !!API_URL && !!(tg && tg.initData);
+    }
+
+    /* text/plain — чтобы браузер не делал лишний CORS-запрос OPTIONS */
+    async function api(path, body) {
+      const payload = Object.assign({ initData: tg.initData }, body || {});
+      const res = await fetch(API_URL.replace(/\/+$/, '') + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    }
+
+    /* Забрать пересланные боту сообщения в «Что смотреть» */
+    async function pullInbox() {
+      if (!serverEnabled() || inboxBusy) return;
+      inboxBusy = true;
+      try {
+        const res = await api('/api/inbox');
+        const items = Array.isArray(res.items) ? res.items : [];
+        if (!items.length) return;
+
+        const fresh = items
+          .filter((it) => it && typeof it.id === 'string' && !data.watch.some((w) => w.id === it.id))
+          .map((it) => ({
+            id: it.id,
+            text: String(it.text || '').slice(0, 2000),
+            link: normalizeLink(it.link || ''),
+            image: isValidImage(it.image) ? it.image : null,
+            done: false,
+            created: Number(it.created) || Date.now()
+          }));
+
+        if (fresh.length) {
+          let ok = mutate(() => { data.watch.unshift(...fresh); });
+          if (!ok) {
+            /* Не хватило памяти — пробуем сохранить без картинок */
+            fresh.forEach((f) => { f.image = null; });
+            ok = mutate(() => { data.watch.unshift(...fresh); });
+          }
+          if (!ok) return; // не подтверждаем — попробуем при следующем открытии
+
+          showToast('🎬 Из бота добавлено: ' + fresh.length);
+          if (route.name === 'list' && route.key === 'watch') renderItems();
+          else if (route.name === 'home') render();
+        }
+
+        await api('/api/inbox/ack', { ids: items.map((i) => i.id) });
+      } catch (e) {
+        /* сервер недоступен — попробуем позже */
+      } finally {
+        inboxBusy = false;
+      }
+    }
+
+    /* Задачи с датой для напоминаний: только текст и дата */
+    function tasksPayload() {
+      return data.tasks
+        .filter((t) => !t.done && t.date)
+        .map((t) => ({ id: t.id, text: (t.text || 'Задача с картинкой').slice(0, 300), date: t.date }));
+    }
+
+    function scheduleTaskSync() {
+      if (!serverEnabled()) return;
+      clearTimeout(taskSyncTimer);
+      taskSyncTimer = setTimeout(syncTasks, 1500);
+    }
+
+    async function syncTasks() {
+      if (!serverEnabled()) return;
+      let tz = '';
+      try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { tz = ''; }
+
+      const body = { tasks: tasksPayload(), tz: tz, offset: new Date().getTimezoneOffset() };
+      const signature = JSON.stringify(body);
+      let last = null;
+      try { last = localStorage.getItem(SYNC_KEY); } catch (e) { last = null; }
+      if (signature === last) return; // ничего не изменилось — не тратим запросы
+
+      try {
+        await api('/api/tasks', body);
+        try { localStorage.setItem(SYNC_KEY, signature); } catch (e) { /* не критично */ }
+      } catch (e) {
+        /* повторим при следующем изменении или открытии */
+      }
+    }
+
+    /* =====================================================================
        ТОСТЫ
        ===================================================================== */
 
@@ -1412,6 +1762,20 @@
           if (item) openViewer(item.image);
           break;
         }
+        case 'open-link': {
+          const item = key && id ? findItem(key, id) : null;
+          if (item && item.link) openExternal(item.link);
+          break;
+        }
+        case 'edit-item':
+          if (id) openEditor(id);
+          break;
+        case 'save-edit':
+          if (id) saveEdit(id, itemEl);
+          break;
+        case 'cancel-edit':
+          cancelEdit();
+          break;
         case 'edit-date':
           if (id) openDateEditor(id);
           break;
@@ -1438,11 +1802,22 @@
       } else if (t.classList.contains('date-edit-input')) {
         const itemEl = t.closest('.item');
         if (itemEl) setTaskDate(itemEl.dataset.id, t.value, t);
+      } else if (t.classList.contains('fact-input')) {
+        const itemEl = t.closest('.item');
+        if (itemEl) setFact(itemEl.dataset.id, t.dataset.field, t);
       }
     });
 
     app.addEventListener('input', (e) => {
       if (e.target.tagName === 'TEXTAREA') autoGrow(e.target);
+    });
+
+    /* Enter в полях «Цена факт» / «Место» — закрыть клавиатуру и сохранить */
+    app.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.target.classList && e.target.classList.contains('fact-input')) {
+        e.preventDefault();
+        e.target.blur();
+      }
     });
 
     viewer.addEventListener('click', closeViewer);
@@ -1454,12 +1829,19 @@
       if (handler) handler();
     });
 
-    /* Обновление счётчиков, если данные изменились в другой вкладке (в браузере) */
     window.addEventListener('storage', (e) => {
       if (e.key === STORAGE_KEY) {
         data = loadData();
         if (route.name === 'list') renderItems();
         else render();
+      }
+    });
+
+    /* При возврате в приложение — проверяем новые пересланные сообщения */
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        pullInbox();
+        syncTasks();
       }
     });
 
@@ -1473,21 +1855,18 @@
       try {
         tg.ready();
         tg.expand();
-      } catch (e) { /* вне Telegram — игнорируем */ }
+      } catch (e) { /* вне Telegram */ }
 
-      /* Фиксированная светлая тема по дизайну: белая шапка и фон */
       try {
         if (versionAtLeast('6.9')) tg.setHeaderColor('#FFFFFF');
         if (versionAtLeast('6.1')) tg.setBackgroundColor('#FFFFFF');
         if (versionAtLeast('7.10')) tg.setBottomBarColor('#FFFFFF');
       } catch (e) { /* игнорируем */ }
 
-      /* Чтобы прокрутка списка не сворачивала приложение свайпом вниз */
       try {
         if (versionAtLeast('7.7')) tg.disableVerticalSwipes();
       } catch (e) { /* игнорируем */ }
 
-      /* Системная кнопка «Назад» Telegram */
       try {
         if (versionAtLeast('6.1')) tg.BackButton.onClick(goBack);
       } catch (e) { /* игнорируем */ }
@@ -1495,6 +1874,8 @@
 
     initTelegram();
     render();
+    pullInbox();
+    syncTasks();
   </script>
 </body>
 </html>
